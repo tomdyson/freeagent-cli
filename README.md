@@ -40,9 +40,9 @@ Credentials are stored at `~/Library/Application Support/freeagent-cli/config.js
 
 ```
 freeagent-cli --help                                       # canonical flow
-freeagent-cli projects                                     # projects + tasks in one call
+freeagent-cli recent                                       # what you've already logged (run this first to avoid duplicates)
 freeagent-cli log <project> <duration> [comment...]        # submit a timeslip
-freeagent-cli recent                                       # last few timeslips
+freeagent-cli projects                                     # first-time / discovery: projects + tasks in one call
 ```
 
 Examples:
