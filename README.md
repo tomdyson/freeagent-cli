@@ -1,0 +1,55 @@
+# freeagent-cli
+
+A small CLI for submitting FreeAgent timeslips without clicking through the web UI.
+
+```
+freeagent-cli time submit --project acme --hours 1h30m --comment "fixed the thing"
+```
+
+## Install
+
+```
+uv tool install freeagent-cli
+```
+
+## One-time setup
+
+You'll need to register your own OAuth app with FreeAgent. It takes about two minutes and keeps your data and rate limits separate from everyone else's.
+
+1. Go to <https://dev.freeagent.com/apps> and create a new app.
+2. Set the redirect URI to: `http://localhost:7878/callback`
+3. Note the **OAuth identifier** and **OAuth secret**.
+4. Save them locally:
+
+   ```
+   freeagent-cli auth init --client-id <id> --client-secret <secret>
+   ```
+
+   Add `--sandbox` if you want to test against the FreeAgent sandbox first.
+5. Authorise the app in your browser:
+
+   ```
+   freeagent-cli auth login
+   ```
+
+   A browser tab opens, you approve, and the CLI captures the refresh token. The refresh token lasts ~20 years; access tokens auto-refresh on every command.
+
+Credentials are stored at `~/Library/Application Support/freeagent-cli/config.json` (macOS) or the equivalent platform config directory, with file mode `0600`.
+
+## Usage
+
+```
+freeagent-cli --help                              # canonical flow
+freeagent-cli projects list                       # projects + tasks in one call
+freeagent-cli time submit --project <name> --hours 1h30m [--task <name>] [--comment "..."] [--dry-run]
+```
+
+- **`--hours`** accepts `1.5`, `90m`, `1h30m`, or `1:30`.
+- **`--project`** / **`--task`** match by case-insensitive name substring, numeric id, or full URL.
+- **`--task`** is optional when the project has a single task; otherwise the error message lists the choices.
+- **`--date`** defaults to today (ISO `YYYY-MM-DD` to override).
+- **`--dry-run`** resolves the project/task/date and prints the would-be submission without sending it.
+
+## License
+
+MIT
