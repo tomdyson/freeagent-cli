@@ -37,6 +37,22 @@ def parse_hours(s: str) -> float:
     raise ValueError(f"Cannot parse duration {s!r}; try 1.5, 90m, 1h30m, or 1:30")
 
 
+def format_hours(value) -> str:
+    """Format a decimal-hours value as 40m / 1h / 1h30m, rounding to the nearest minute."""
+    try:
+        total_min = round(float(value) * 60)
+    except (TypeError, ValueError):
+        return str(value)
+    if total_min == 0:
+        return "0m"
+    h, m = divmod(total_min, 60)
+    if h == 0:
+        return f"{m}m"
+    if m == 0:
+        return f"{h}h"
+    return f"{h}h{m}m"
+
+
 def _resolve(items: list[dict], query: str, label: str) -> dict:
     if query.startswith("http"):
         match = [i for i in items if i["url"] == query]
@@ -73,9 +89,9 @@ def _pick_task(tasks: list[dict], task_q: str | None, project_name: str) -> dict
 @click.group(epilog="""
 \b
 Typical flow:
-  freeagent-cli projects                          # projects + tasks in one call
+  freeagent-cli recent                            # check what you've already logged (avoids duplicates)
   freeagent-cli log <project> <duration> [comment]  [--task <name>] [--dry-run]
-  freeagent-cli recent                            # last few timeslips
+  freeagent-cli projects                          # first-time / discovery: projects + tasks
 
 \b
 Examples:
@@ -209,6 +225,8 @@ def log(project_q, duration, comment_parts, task_q, date_, dry_run):
       freeagent-cli log Acme 1h30m "fixed the thing"
       freeagent-cli log Acme 90m fixed the thing       # comment without quotes
       freeagent-cli log "Big Co" 1.5 --task Coding --date 2026-05-01
+
+    Tip: run `freeagent-cli recent` first to avoid duplicate entries.
     """
     try:
         hours = parse_hours(duration)
@@ -222,7 +240,7 @@ def log(project_q, duration, comment_parts, task_q, date_, dry_run):
     dated_on = date_ or _dt.date.today().isoformat()
 
     if dry_run:
-        click.echo(f"DRY RUN — would submit {hours}h on {dated_on} → {project['name']} / {task['name']}")
+        click.echo(f"DRY RUN — would submit {format_hours(hours)} on {dated_on} → {project['name']} / {task['name']}")
         click.echo(f"  project: {project['url']}")
         click.echo(f"  task:    {task['url']}")
         if comment:
@@ -235,7 +253,7 @@ def log(project_q, duration, comment_parts, task_q, date_, dry_run):
         dated_on=dated_on, hours=hours, comment=comment,
     )
     ts = result["timeslips"][0] if "timeslips" in result else result.get("timeslip", result)
-    click.echo(f"Submitted {hours}h on {dated_on} → {project['name']} / {task['name']}")
+    click.echo(f"Submitted {format_hours(hours)} on {dated_on} → {project['name']} / {task['name']}")
     if isinstance(ts, dict) and "url" in ts:
         click.echo(ts["url"])
 
@@ -265,7 +283,7 @@ def recent(limit, days, all_users):
         pname = proj["name"] if isinstance(proj, dict) else "?"
         tname = task_["name"] if isinstance(task_, dict) else "?"
         comment = (s.get("comment") or "").replace("\n", " ")
-        click.echo(f"{s.get('dated_on','?')}\t{s.get('hours','?')}h\t{pname}\t{tname}\t{comment}")
+        click.echo(f"{s.get('dated_on','?')}\t{format_hours(s.get('hours'))}\t{pname}\t{tname}\t{comment}")
 
 
 if __name__ == "__main__":
