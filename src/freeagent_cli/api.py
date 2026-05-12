@@ -16,7 +16,7 @@ class FreeAgent:
             headers={
                 "Authorization": f"Bearer {auth.access_token(self.cfg)}",
                 "Accept": "application/json",
-                "User-Agent": "freeagent-cli/0.1",
+                "User-Agent": "freeagent-cli/0.2",
             },
             timeout=30,
         )
@@ -45,6 +45,17 @@ class FreeAgent:
 
     def tasks(self, project_url: str) -> list[dict]:
         return self.get("/v2/tasks", project=project_url).get("tasks", [])
+
+    def list_timeslips(self, *, from_date: str, to_date: str | None = None,
+                       user: str | None = None, nested: bool = False) -> list[dict]:
+        params: dict = {"from_date": from_date}
+        if to_date:
+            params["to_date"] = to_date
+        if user:
+            params["user"] = user
+        if nested:
+            params["nested"] = "true"
+        return self.get("/v2/timeslips", **params).get("timeslips", [])
 
     def create_timeslip(self, *, user: str, project: str, task: str,
                         dated_on: str, hours: float, comment: str | None = None) -> dict:

@@ -37,19 +37,6 @@ def parse_hours(s: str) -> float:
     raise ValueError(f"Cannot parse duration {s!r}; try 1.5, 90m, 1h30m, or 1:30")
 
 
-class _HoursType(click.ParamType):
-    name = "duration"
-
-    def convert(self, value, param, ctx):
-        try:
-            return parse_hours(value)
-        except ValueError as e:
-            self.fail(str(e), param, ctx)
-
-
-HOURS = _HoursType()
-
-
 def _resolve(items: list[dict], query: str, label: str) -> dict:
     if query.startswith("http"):
         match = [i for i in items if i["url"] == query]
@@ -85,13 +72,20 @@ def _pick_task(tasks: list[dict], task_q: str | None, project_name: str) -> dict
 
 @click.group(epilog="""
 \b
-Typical flow (for agents/scripts):
-  freeagent-cli projects list                 # projects + tasks in one call
-  freeagent-cli time submit --project <name> --hours 1h30m [--task <name>] [--comment "..."] [--dry-run]
+Typical flow:
+  freeagent-cli projects                          # projects + tasks in one call
+  freeagent-cli log <project> <duration> [comment]  [--task <name>] [--dry-run]
+  freeagent-cli recent                            # last few timeslips
 
 \b
-Time formats accepted: 1.5  90m  1h30m  1:30
-Project/task selection: numeric id, full URL, or case-insensitive name substring.
+Examples:
+  freeagent-cli log Acme 1h30m "fixed the thing"
+  freeagent-cli log "Big Co" 90m --task Coding
+  freeagent-cli log Acme 1.5 --dry-run
+
+\b
+Time formats: 1.5  90m  1h30m  1:30
+Project/task: numeric id, full URL, or case-insensitive name substring.
 --task is optional only when the project has a single task; otherwise the error lists the choices.
 """)
 def main():
@@ -145,7 +139,7 @@ def auth_status():
     click.echo(f"Refresh: {'present' if c.refresh_token else 'missing'}")
 
 
-# -- me / projects / tasks -----------------------------------------------
+# -- me ------------------------------------------------------------------
 
 @main.command()
 def me():
@@ -155,36 +149,41 @@ def me():
     click.echo(u["url"])
 
 
-@main.group()
-def projects():
-    """Project commands."""
+# -- projects / tasks ----------------------------------------------------
 
-
-@projects.command("list")
+@main.command()
 @click.option("--all", "show_all", is_flag=True, help="Include inactive projects.")
 @click.option("--tasks/--no-tasks", "with_tasks", default=True,
               help="Include tasks for each project (default: yes).")
-def projects_list(show_all, with_tasks):
+@click.option("--flat", is_flag=True,
+              help="One project/task pair per line for grep (tab-separated).")
+def projects(show_all, with_tasks, flat):
     """List projects (and their tasks, by default)."""
     api = _api()
     view = "all" if show_all else "active"
     for p in api.projects(view=view):
         pid = p["url"].rsplit("/", 1)[-1]
-        click.echo(f"{pid}\t{p['name']}")
-        if with_tasks:
-            for t in api.tasks(p["url"]):
+        if not with_tasks:
+            click.echo(f"{pid}\t{p['name']}")
+            continue
+        ts = api.tasks(p["url"])
+        if flat:
+            if not ts:
+                click.echo(f"{pid}\t{p['name']}\t\t")
+            for t in ts:
+                tid = t["url"].rsplit("/", 1)[-1]
+                click.echo(f"{pid}\t{p['name']}\t{tid}\t{t['name']}")
+        else:
+            click.echo(f"{pid}\t{p['name']}")
+            for t in ts:
                 tid = t["url"].rsplit("/", 1)[-1]
                 click.echo(f"\t{tid}\t{t['name']}")
 
 
-@main.group()
-def tasks():
-    """Task commands."""
-
-
-@tasks.command("list")
+@main.command()
 @click.option("--project", "project_q", required=True, help="Project name substring, id, or URL.")
-def tasks_list(project_q):
+def tasks(project_q):
+    """List tasks for a project."""
     api = _api()
     project = _resolve(api.projects(view="active"), project_q, "project")
     for t in api.tasks(project["url"]):
@@ -192,24 +191,31 @@ def tasks_list(project_q):
         click.echo(f"{tid}\t{t['name']}")
 
 
-# -- time submit ---------------------------------------------------------
+# -- log -----------------------------------------------------------------
 
-@main.group()
-def time():
-    """Timeslip commands."""
-
-
-@time.command("submit")
-@click.option("--project", "project_q", required=True, help="Project name substring, id, or URL.")
+@main.command()
+@click.argument("project_q", metavar="PROJECT")
+@click.argument("duration", metavar="HOURS")
+@click.argument("comment_parts", nargs=-1, metavar="[COMMENT...]")
 @click.option("--task", "task_q", default=None,
               help="Task name substring, id, or URL. Optional only if the project has a single task.")
-@click.option("--hours", required=True, type=HOURS,
-              help="Duration: 1.5, 90m, 1h30m, 1:30, etc.")
 @click.option("--date", "date_", default=None, help="YYYY-MM-DD (default: today).")
-@click.option("--comment", default=None)
 @click.option("--dry-run", is_flag=True, help="Resolve and preview, but don't submit.")
-def time_submit(project_q, task_q, hours, date_, comment, dry_run):
-    """Submit a timeslip."""
+def log(project_q, duration, comment_parts, task_q, date_, dry_run):
+    """Submit a timeslip: PROJECT HOURS [COMMENT...].
+
+    \b
+    Examples:
+      freeagent-cli log Acme 1h30m "fixed the thing"
+      freeagent-cli log Acme 90m fixed the thing       # comment without quotes
+      freeagent-cli log "Big Co" 1.5 --task Coding --date 2026-05-01
+    """
+    try:
+        hours = parse_hours(duration)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    comment = " ".join(comment_parts) if comment_parts else None
+
     api = _api()
     project = _resolve(api.projects(view="active"), project_q, "project")
     task = _pick_task(api.tasks(project["url"]), task_q, project["name"])
@@ -232,6 +238,34 @@ def time_submit(project_q, task_q, hours, date_, comment, dry_run):
     click.echo(f"Submitted {hours}h on {dated_on} → {project['name']} / {task['name']}")
     if isinstance(ts, dict) and "url" in ts:
         click.echo(ts["url"])
+
+
+# -- recent --------------------------------------------------------------
+
+@main.command()
+@click.option("-n", "limit", default=5, show_default=True, help="How many entries to show.")
+@click.option("--days", default=14, show_default=True, help="Look back this many days.")
+@click.option("--all-users", is_flag=True, help="Include other users (default: just you).")
+def recent(limit, days, all_users):
+    """Show recent timeslips (most recent first)."""
+    api = _api()
+    from_date = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+    user_url = None if all_users else api.me()["url"]
+    slips = api.list_timeslips(from_date=from_date, user=user_url, nested=True)
+    slips.sort(
+        key=lambda t: (t.get("dated_on", ""), t.get("created_at", "")),
+        reverse=True,
+    )
+    if not slips:
+        click.echo(f"(no timeslips in the last {days} days)")
+        return
+    for s in slips[:limit]:
+        proj = s.get("project")
+        task_ = s.get("task")
+        pname = proj["name"] if isinstance(proj, dict) else "?"
+        tname = task_["name"] if isinstance(task_, dict) else "?"
+        comment = (s.get("comment") or "").replace("\n", " ")
+        click.echo(f"{s.get('dated_on','?')}\t{s.get('hours','?')}h\t{pname}\t{tname}\t{comment}")
 
 
 if __name__ == "__main__":

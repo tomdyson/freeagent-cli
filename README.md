@@ -3,7 +3,7 @@
 A small CLI for submitting FreeAgent timeslips without clicking through the web UI.
 
 ```
-freeagent-cli time submit --project acme --hours 1h30m --comment "fixed the thing"
+freeagent-cli log acme 1h30m "fixed the thing"
 ```
 
 ## Install
@@ -39,16 +39,27 @@ Credentials are stored at `~/Library/Application Support/freeagent-cli/config.js
 ## Usage
 
 ```
-freeagent-cli --help                              # canonical flow
-freeagent-cli projects list                       # projects + tasks in one call
-freeagent-cli time submit --project <name> --hours 1h30m [--task <name>] [--comment "..."] [--dry-run]
+freeagent-cli --help                                       # canonical flow
+freeagent-cli projects                                     # projects + tasks in one call
+freeagent-cli log <project> <duration> [comment...]        # submit a timeslip
+freeagent-cli recent                                       # last few timeslips
 ```
 
-- **`--hours`** accepts `1.5`, `90m`, `1h30m`, or `1:30`.
-- **`--project`** / **`--task`** match by case-insensitive name substring, numeric id, or full URL.
-- **`--task`** is optional when the project has a single task; otherwise the error message lists the choices.
+Examples:
+
+```
+freeagent-cli log Acme 1h30m "fixed the thing"
+freeagent-cli log Acme 90m fixed the thing                 # comment without quotes
+freeagent-cli log "Big Co" 1.5 --task Coding --date 2026-05-01
+freeagent-cli log Acme 1.5 --dry-run                       # preview, don't submit
+```
+
+- **Duration** accepts `1.5`, `90m`, `1h30m`, or `1:30`.
+- **Project / task** match by case-insensitive name substring, numeric id, or full URL.
+- **`--task`** is optional when the project has a single task; otherwise the error lists the choices.
 - **`--date`** defaults to today (ISO `YYYY-MM-DD` to override).
 - **`--dry-run`** resolves the project/task/date and prints the would-be submission without sending it.
+- **`projects --flat`** emits one project/task pair per line (tab-separated) for grep/awk.
 
 ## License
 
