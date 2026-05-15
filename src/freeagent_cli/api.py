@@ -71,3 +71,20 @@ class FreeAgent:
         if comment:
             body["timeslip"]["comment"] = comment
         return self.post("/v2/timeslips", body)
+
+    def delete(self, path: str) -> dict:
+        with self._client() as c:
+            r = c.delete(path)
+            r.raise_for_status()
+            return r.json()
+
+    def delete_timeslip(self, timeslip_id: str) -> dict:
+        try:
+            return self.delete(f"/v2/timeslips/{timeslip_id}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return {"deleted": True, "id": timeslip_id, "already_deleted": True}
+            raise
+
+    def get_timeslip(self, timeslip_id: str) -> dict:
+        return self.get(f"/v2/timeslips/{timeslip_id}", nested="true")["timeslip"]

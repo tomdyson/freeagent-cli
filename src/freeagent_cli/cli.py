@@ -19,6 +19,10 @@ def _api() -> FreeAgent:
     return FreeAgent(c)
 
 
+def _extract_id(query: str) -> str:
+    return query.rsplit("/", 1)[-1] if "/" in query else query
+
+
 def parse_hours(s: str) -> float:
     """Parse a duration: 1.5, 90m, 1h, 1h30m, 1:30."""
     s = s.strip().lower()
@@ -283,7 +287,151 @@ def recent(limit, days, all_users):
         pname = proj["name"] if isinstance(proj, dict) else "?"
         tname = task_["name"] if isinstance(task_, dict) else "?"
         comment = (s.get("comment") or "").replace("\n", " ")
-        click.echo(f"{s.get('dated_on','?')}\t{format_hours(s.get('hours'))}\t{pname}\t{tname}\t{comment}")
+        click.echo(f"{s.get('dated_on','?')}\t{format_hours(s.get('hours'))}\t{pname}\t{tname}\t{comment}\t{s.get('url','')}")
+
+
+# -- delete --------------------------------------------------------------
+
+@main.command()
+@click.argument("timeslip_q", metavar="TIMESLIP_ID_OR_URL")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+def delete(timeslip_q, yes):
+    """Delete a timeslip by numeric ID or full URL."""
+    api = _api()
+    tid = _extract_id(timeslip_q)
+    try:
+        ts = api.get_timeslip(tid)
+    except Exception:
+        raise click.UsageError(f"Timeslip {tid!r} not found.")
+    proj = ts.get("project")
+    task_ = ts.get("task")
+    pname = proj["name"] if isinstance(proj, dict) else "?"
+    tname = task_["name"] if isinstance(task_, dict) else "?"
+    comment = (ts.get("comment") or "")[:80]
+    click.echo(f"{ts.get('dated_on','?')}  {format_hours(ts.get('hours'))}  {pname} / {tname}")
+    if comment:
+        click.echo(f"  {comment}")
+    if not yes:
+        click.confirm("Delete this timeslip?", abort=True)
+    result = api.delete_timeslip(tid)
+    if result.get("already_deleted"):
+        click.echo("Timeslip already deleted.")
+    else:
+        click.echo("Deleted.")
+    click.echo(ts.get("url", ""))
+
+
+# -- edit ----------------------------------------------------------------
+
+@main.command()
+@click.argument("timeslip_q", metavar="TIMESLIP_ID_OR_URL")
+@click.option("--project", "project_q", default=None,
+              help="New project (name substring, id, or URL).")
+@click.option("--task", "task_q", default=None,
+              help="New task (name substring, id, or URL).")
+@click.option("--duration", "duration_str", default=None,
+              help="New duration (1.5, 90m, 1h30m, 1:30).")
+@click.option("--date", "date_", default=None, help="New date YYYY-MM-DD.")
+@click.option("--comment", "comment", default=None, help="New comment.")
+@click.option("--dry-run", is_flag=True, help="Resolve and preview, but don't submit.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+def edit(timeslip_q, project_q, task_q, duration_str, date_, comment, dry_run, yes):
+    """Edit a timeslip: fetch, apply changes, delete old, create new.
+
+    \b
+    Only the options you pass are changed; everything else stays the same.
+    If you change --project, --task defaults to a matching task name in the new
+    project if one exists, otherwise you must pass --task explicitly.
+
+    \b
+    Examples:
+      freeagent-cli edit 123456 --duration 2h
+      freeagent-cli edit https://api.freeagent.com/v2/timeslips/123456 --comment "done"
+      freeagent-cli edit 123456 --project "Big Co" --task Coding --dry-run
+    """
+    api = _api()
+    tid = _extract_id(timeslip_q)
+    try:
+        old = api.get_timeslip(tid)
+    except Exception:
+        raise click.UsageError(f"Timeslip {tid!r} not found.")
+
+    if not any([project_q, task_q, duration_str, date_, comment is not None]):
+        raise click.UsageError("Nothing to change. Use --help to see options.")
+
+    old_proj = old.get("project")
+    old_task = old.get("task")
+
+    new_project_url = old_proj["url"] if isinstance(old_proj, dict) else ""
+    new_task_url = old_task["url"] if isinstance(old_task, dict) else ""
+    new_hours = float(old.get("hours", 0))
+    new_date = old.get("dated_on", "")
+    new_comment = old.get("comment") or ""
+
+    old_pname = old_proj["name"] if isinstance(old_proj, dict) else "?"
+    old_tname = old_task["name"] if isinstance(old_task, dict) else "?"
+    new_pname = old_pname
+    new_tname = old_tname
+
+    if project_q:
+        new_proj = _resolve(api.projects(view="active"), project_q, "project")
+        new_project_url = new_proj["url"]
+        new_pname = new_proj["name"]
+        if not task_q:
+            new_tasks = api.tasks(new_project_url)
+            matches = [t for t in new_tasks if t["name"].lower() == old_tname.lower()]
+            if len(matches) == 1:
+                new_task_url = matches[0]["url"]
+                new_tname = matches[0]["name"]
+            else:
+                names = ", ".join(t["name"] for t in new_tasks) or "(none)"
+                raise click.UsageError(
+                    f"Project changed; --task required. Available in {new_proj['name']!r}: {names}"
+                )
+
+    if task_q:
+        proj_tasks = api.tasks(new_project_url)
+        new_task = _resolve(proj_tasks, task_q, "task")
+        new_task_url = new_task["url"]
+        new_tname = new_task["name"]
+
+    if duration_str:
+        try:
+            new_hours = parse_hours(duration_str)
+        except ValueError as e:
+            raise click.UsageError(str(e))
+
+    if date_:
+        new_date = date_
+
+    if comment is not None:
+        new_comment = comment
+
+    lines = []
+    lines.append("Before → After")
+    lines.append(f"  Project:  {old_pname} → {new_pname}")
+    lines.append(f"  Task:     {old_tname} → {new_tname}")
+    lines.append(f"  Date:     {old.get('dated_on','?')} → {new_date}")
+    lines.append(f"  Duration: {format_hours(old.get('hours'))} → {format_hours(new_hours)}")
+    lines.append(f"  Comment:  {repr(old.get('comment') or '')} → {repr(new_comment)}")
+    click.echo("\n".join(lines))
+
+    if dry_run:
+        return
+
+    if not yes:
+        click.confirm("Proceed with edit?", abort=True)
+
+    user_url = api.me()["url"]
+    result = api.create_timeslip(
+        user=user_url, project=new_project_url, task=new_task_url,
+        dated_on=new_date, hours=new_hours, comment=new_comment or None,
+    )
+    ts = result["timeslips"][0] if "timeslips" in result else result.get("timeslip", result)
+    api.delete_timeslip(tid)
+    click.echo(f"Edited → {new_pname} / {new_tname}{' --dry-run' if dry_run else ''}")
+    if isinstance(ts, dict) and "url" in ts:
+        click.echo(ts["url"])
 
 
 if __name__ == "__main__":
