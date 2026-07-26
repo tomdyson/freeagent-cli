@@ -83,7 +83,31 @@ freeagent-cli unexplained -n 0 | grep -i stripe            # the whole backlog, 
 
 Hidden accounts are left out of `accounts` unless you pass `--all`, and are never picked as the implicit default for `unexplained`. Naming one explicitly with `--account` still works.
 
-Explaining transactions isn't supported yet — this is a read-only view of the backlog.
+### Explaining transactions
+
+```
+freeagent-cli categories --search travel                   # find a category
+freeagent-cli explain 12345 285 --dry-run                  # preview
+freeagent-cli explain 12345 285 --description "train fare" # submit
+freeagent-cli explain 12345 285 --amount 20                # explain part of it
+```
+
+`categories` lists nominal code, group and description, one per line. Filter with `--search` or `--group` (`admin_expenses`, `cost_of_sales`, `income`, `general`).
+
+- **CATEGORY** matches by nominal code (`285`), full URL, or case-insensitive description substring. An ambiguous match lists the candidates with their codes.
+- **`--amount`** explains part of a transaction; it defaults to the whole unexplained amount and can't exceed it. Currency symbols and commas are ignored.
+- **The sign always comes from the transaction**, so `--amount 20` on a payment of `-42.50` explains `-20.00`. You can't accidentally book a spend as income.
+- **`--date`** defaults to the transaction's own date.
+- **`--dry-run`** previews; otherwise you're asked to confirm. `-y` skips the prompt.
+
+**VAT:** `explain` doesn't set sales-tax fields, so FreeAgent applies the category's automatic rate. If a transaction needs a non-standard rate, EC status, or a manual VAT amount, do that one in the web UI.
+
+A typical backlog session:
+
+```
+freeagent-cli unexplained
+freeagent-cli explain 12345 285 --description "client dinner"
+```
 
 ## License
 

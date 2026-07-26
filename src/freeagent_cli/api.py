@@ -117,6 +117,47 @@ class FreeAgent:
             from_date=from_date, to_date=to_date,
         )
 
+    def bank_transaction(self, txn_id: str) -> dict:
+        return self.get(f"/v2/bank_transactions/{txn_id}")["bank_transaction"]
+
+    def categories(self) -> list[dict]:
+        """Flatten the four parallel category arrays into one list.
+
+        The API groups categories into `admin_expenses_categories`,
+        `cost_of_sales_categories`, `income_categories` and `general_categories`.
+        Each entry is tagged with the group it came from. Note that categories
+        name themselves with `description`, not `name`, and are keyed by nominal
+        code — which can carry a leading zero, e.g. "001".
+        """
+        data = self.get("/v2/categories", per_page=PER_PAGE)
+        out: list[dict] = []
+        for group, items in data.items():
+            if not group.endswith("_categories") or not isinstance(items, list):
+                continue
+            label = group[: -len("_categories")]
+            out.extend({**c, "group": label} for c in items)
+        return out
+
+    def create_explanation(self, *, bank_transaction: str, dated_on: str,
+                           gross_value: str, category: str,
+                           description: str | None = None) -> dict:
+        """Explain (part of) a bank transaction against a category.
+
+        Sales-tax fields are deliberately omitted so FreeAgent applies the
+        category's automatic rate rather than this CLI guessing at VAT.
+        """
+        body: dict = {
+            "bank_transaction_explanation": {
+                "bank_transaction": bank_transaction,
+                "dated_on": dated_on,
+                "gross_value": gross_value,
+                "category": category,
+            }
+        }
+        if description:
+            body["bank_transaction_explanation"]["description"] = description
+        return self.post("/v2/bank_transaction_explanations", body)
+
     def delete(self, path: str) -> dict:
         with self._client() as c:
             r = c.delete(path)
