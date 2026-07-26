@@ -4,6 +4,7 @@ import secrets
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -20,9 +21,11 @@ def _authorize_url(c: cfg.Config) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    received: dict[str, str] = {}
+    # Shared on the class on purpose: HTTPServer instantiates a new handler per
+    # request, so this is how the callback hands the result back to login().
+    received: ClassVar[dict[str, str]] = {}
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path != "/callback":
             self.send_response(404)

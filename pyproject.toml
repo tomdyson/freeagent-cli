@@ -44,4 +44,25 @@ packages = ["src/freeagent_cli"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "ruff>=0.14",
 ]
+
+[tool.ruff]
+# Wide enough for the existing tab-separated click.echo lines and help epilogs,
+# which read worse wrapped than long.
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "N", "RUF"]
+ignore = [
+    # `date.today()` is correct here. Timeslips and bank transactions are dated
+    # in the user's local day; a tz-aware UTC date would file work on the wrong
+    # day either side of midnight. Kept out of `select` rather than noqa'd at
+    # each of the three call sites.
+    "DTZ011",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests lean on long inline fixtures where wrapping hurts more than it helps.
+"tests/*" = ["E501"]

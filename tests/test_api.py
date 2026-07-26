@@ -93,8 +93,8 @@ class TestGetAll:
         # Every page claims there's another one.
         mock_client.get.return_value = _page("projects", [{"name": "A"}], next_url="/v2/projects?page=2")
 
-        with patch.object(api, "_client", return_value=mock_client):
-            with pytest.raises(RuntimeError, match="Stopped after 100 pages"):
+        with patch.object(api, "_client", return_value=mock_client), \
+             pytest.raises(RuntimeError, match="Stopped after 100 pages"):
                 api.get_all("/v2/projects", "projects")
 
 
@@ -169,8 +169,8 @@ class TestDeleteTimeslip:
         error = httpx.HTTPStatusError("500 Server Error", request=MagicMock(), response=error_response)
         mock_client.delete.side_effect = error
 
-        with patch.object(api, "_client", return_value=mock_client):
-            with pytest.raises(httpx.HTTPStatusError):
+        with patch.object(api, "_client", return_value=mock_client), \
+             pytest.raises(httpx.HTTPStatusError):
                 api.delete_timeslip("42")
 
 
