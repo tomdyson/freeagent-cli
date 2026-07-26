@@ -5,6 +5,7 @@ import math as _math
 import re
 
 import click
+import httpx
 
 from . import auth
 from . import config as cfg
@@ -86,6 +87,28 @@ def _resolve(items: list[dict], query: str, label: str) -> dict:
     return matches[0]
 
 
+def _fetch_txn(api, txn_id: str) -> dict:
+    """Fetch a bank transaction, distinguishing "missing" from "went wrong".
+
+    A bare `except Exception` here would report an expired token or a 500 as
+    "not found", sending you after the wrong problem.
+    """
+    try:
+        return api.bank_transaction(txn_id)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status == 404:
+            raise click.UsageError(f"Bank transaction {txn_id!r} not found.")
+        if status in (401, 403):
+            raise click.UsageError(
+                f"FreeAgent refused the request ({status}). "
+                "Check `freeagent-cli auth status`, and that your app has Banking access."
+            )
+        raise click.UsageError(f"FreeAgent returned {status} for transaction {txn_id}.")
+    except httpx.RequestError as e:
+        raise click.UsageError(f"Could not reach FreeAgent: {e}")
+
+
 def _category_label(cat: dict) -> str:
     return f"{cat.get('nominal_code','?')} {cat.get('description','?')}"
 
@@ -97,12 +120,10 @@ def _pick_category(cats: list[dict], query: str) -> dict:
     because a company has ~100 of them — listing them all on a miss is useless,
     so misses point at `categories --search` instead.
     """
-    if query.startswith("http"):
-        match = [c for c in cats if c["url"] == query]
-        if match:
-            return match[0]
-    if query.isdigit():
-        match = [c for c in cats if c["url"].rsplit("/", 1)[-1] == query]
+    # Match on the trailing segment so absolute and relative URLs behave alike.
+    key = _extract_id(query) if "/" in query else query
+    if key:
+        match = [c for c in cats if c["url"] == query or c["url"].rsplit("/", 1)[-1] == key]
         if match:
             return match[0]
     q = query.lower()
@@ -508,12 +529,9 @@ def explain(txn_q, category_q, amount_str, description, date_, dry_run, yes):
     """
     api = _api()
     tid = _extract_id(txn_q)
-    try:
-        txn = api.bank_transaction(tid)
-    except Exception:
-        raise click.UsageError(f"Bank transaction {tid!r} not found.")
+    txn = _fetch_txn(api, tid)
 
-    unexplained_amt = float(txn.get("unexplained_amount") or 0)
+    unexplained_amt = _unexplained_value(txn)
     if unexplained_amt == 0:
         raise click.UsageError(
             f"Transaction {tid} has nothing left to explain."
@@ -568,6 +586,8 @@ def explain(txn_q, category_q, amount_str, description, date_, dry_run, yes):
     exp = result.get("bank_transaction_explanation", result)
     if isinstance(exp, dict) and "url" in exp:
         click.echo(exp["url"])
+
+
 def _unexplained_value(txn: dict) -> float:
     """The still-unexplained amount as a float, falling back to the full amount.
 
