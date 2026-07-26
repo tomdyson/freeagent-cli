@@ -79,7 +79,7 @@ freeagent-cli unexplained -n 0 | grep -i stripe            # the whole backlog, 
 - **`-n`** defaults to 25. Pass `0` for all.
 - A summary (count and total) goes to **stderr**, so piping stdout into `grep`/`awk` stays clean.
 
-Hidden accounts are excluded from both commands; `accounts --all` includes them.
+Hidden accounts are left out of `accounts` unless you pass `--all`, and are never picked as the implicit default for `unexplained`. Naming one explicitly with `--account` still works.
 
 ### Explaining transactions
 

@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from freeagent_cli.cli import main
 from freeagent_cli.config import Config
+
+
+def _http_error(status):
+    """An httpx.HTTPStatusError carrying a given status code."""
+    response = MagicMock()
+    response.status_code = status
+    return httpx.HTTPStatusError(str(status), request=MagicMock(), response=response)
 
 
 @pytest.fixture
@@ -433,6 +441,44 @@ class TestUnexplained:
         assert result.exit_code != 0
         assert "No bank account matches 'Nope'" in result.output
 
+    def test_summary_survives_junk_amounts(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-20.0", "unexplained_amount": "-20.0",
+             "description": "Fine", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/2", "dated_on": "2026-06-02",
+             "amount": None, "unexplained_amount": None,
+             "description": "Null amount", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/3", "dated_on": "2026-06-03",
+             "amount": "N/A", "unexplained_amount": "",
+             "description": "Junk amount", "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        # All three rows still print, and the total ignores what it can't parse.
+        assert len([ln for ln in result.stdout.splitlines() if ln.strip()]) == 3
+        assert "total -20.00 GBP" in result.stderr
+
+    def test_unexplained_amount_falls_back_to_amount(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-30.0", "description": "No unexplained field",
+             "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        assert "total -30.00 GBP" in result.stderr
+
 
 CATEGORIES = [
     {"url": "/v2/categories/285", "nominal_code": "285",
@@ -661,7 +707,7 @@ class TestExplain:
         assert kwargs["description"] == "note"
 
     def test_missing_transaction(self, runner, mock_config, mock_api):
-        mock_api.bank_transaction.side_effect = Exception("404")
+        mock_api.bank_transaction.side_effect = _http_error(404)
 
         with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
              patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
@@ -772,7 +818,7 @@ class TestExplain:
     def test_like_missing_source_transaction(self, runner, mock_config, mock_api):
         _mock_explain(mock_api)
         mock_api.bank_transaction.side_effect = (
-            lambda tid: dict(TXN) if tid == "5" else (_ for _ in ()).throw(Exception("404"))
+            lambda tid: dict(TXN) if tid == "5" else (_ for _ in ()).throw(_http_error(404))
         )
 
         with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
@@ -781,6 +827,20 @@ class TestExplain:
 
         assert result.exit_code != 0
         assert "Bank transaction '99' not found" in result.output
+
+    def test_like_auth_failure_is_not_reported_as_missing(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        mock_api.bank_transaction.side_effect = (
+            lambda tid: dict(TXN) if tid == "5" else (_ for _ in ()).throw(_http_error(401))
+        )
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9"])
+
+        assert result.exit_code != 0
+        assert "not found" not in result.output
+        assert "auth status" in result.output
 
     def test_category_and_like_together_rejected(self, runner, mock_config, mock_api):
         _mock_explain(mock_api)
@@ -823,3 +883,75 @@ class TestExplain:
         kwargs = mock_api.create_explanation.call_args.kwargs
         assert kwargs["gross_value"] == "-10.00"
         assert kwargs["category"] == "/v2/categories/286"
+    def test_auth_failure_is_not_reported_as_missing(self, runner, mock_config, mock_api):
+        mock_api.bank_transaction.side_effect = _http_error(401)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285"])
+
+        assert result.exit_code != 0
+        assert "not found" not in result.output
+        assert "auth status" in result.output
+
+    def test_server_error_is_not_reported_as_missing(self, runner, mock_config, mock_api):
+        mock_api.bank_transaction.side_effect = _http_error(500)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285"])
+
+        assert result.exit_code != 0
+        assert "not found" not in result.output
+        assert "returned 500" in result.output
+
+    def test_connection_failure_is_not_reported_as_missing(self, runner, mock_config, mock_api):
+        mock_api.bank_transaction.side_effect = httpx.ConnectError("no route")
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285"])
+
+        assert result.exit_code != 0
+        assert "Could not reach FreeAgent" in result.output
+
+    def test_category_by_relative_url(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "/v2/categories/285", "-y"])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["category"] == "/v2/categories/285"
+
+    def test_category_by_absolute_url(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api, categories=[
+            {"url": "https://api.freeagent.com/v2/categories/285", "nominal_code": "285",
+             "description": "Accommodation and Meals", "group": "admin_expenses"},
+        ])
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, [
+                "explain", "5", "https://api.freeagent.com/v2/categories/285", "-y",
+            ])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["category"] == (
+            "https://api.freeagent.com/v2/categories/285"
+        )
+
+    def test_explains_when_unexplained_amount_absent(self, runner, mock_config, mock_api):
+        # No unexplained_amount field: fall back to `amount` rather than refusing.
+        _mock_explain(mock_api, txn={
+            "url": "/v2/bank_transactions/5", "dated_on": "2026-06-01",
+            "amount": "-42.5", "description": "STRIPE PAYOUT",
+        })
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285", "-y"])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["gross_value"] == "-42.50"
