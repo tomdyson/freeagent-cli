@@ -138,6 +138,11 @@ class FreeAgent:
             out.extend({**c, "group": label} for c in items)
         return out
 
+    def explanation(self, exp_id: str) -> dict:
+        return self.get(
+            f"/v2/bank_transaction_explanations/{exp_id}"
+        )["bank_transaction_explanation"]
+
     def create_explanation(self, *, bank_transaction: str, dated_on: str,
                            gross_value: str, category: str,
                            description: str | None = None) -> dict:

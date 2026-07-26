@@ -669,3 +669,157 @@ class TestExplain:
 
         assert result.exit_code != 0
         assert "Bank transaction '99' not found" in result.output
+
+    def test_like_copies_category(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        source = {
+            "url": "/v2/bank_transactions/9", "dated_on": "2026-05-01",
+            "description": "STRIPE PAYOUT", "amount": "-42.5",
+            "unexplained_amount": "0.0",
+            "bank_transaction_explanations": [
+                {"url": "/v2/bank_transaction_explanations/8",
+                 "category": "/v2/categories/286", "gross_value": "-42.5"},
+            ],
+        }
+        mock_api.bank_transaction.side_effect = lambda tid: dict(TXN) if tid == "5" else source
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9", "-y"])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["category"] == "/v2/categories/286"
+        assert "286 Travel  (from 2026-05-01 STRIPE PAYOUT)" in result.output
+        # Category came from the nested payload, so no extra fetch was needed.
+        mock_api.explanation.assert_not_called()
+
+    def test_like_fetches_abridged_explanation(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        source = {
+            "url": "/v2/bank_transactions/9", "dated_on": "2026-05-01",
+            "description": "STRIPE PAYOUT",
+            # Abridged: entry_type but no category URL.
+            "bank_transaction_explanations": [
+                {"url": "/v2/bank_transaction_explanations/8",
+                 "entry_type": "Travel", "gross_value": "-42.5"},
+            ],
+        }
+        mock_api.bank_transaction.side_effect = lambda tid: dict(TXN) if tid == "5" else source
+        mock_api.explanation.return_value = {"category": "/v2/categories/286"}
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9", "-y"])
+
+        assert result.exit_code == 0
+        mock_api.explanation.assert_called_once_with("8")
+        assert mock_api.create_explanation.call_args.kwargs["category"] == "/v2/categories/286"
+
+    def test_like_with_no_explanations_errors(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        source = {"url": "/v2/bank_transactions/9", "dated_on": "2026-05-01",
+                  "description": "TRANSFER", "bank_transaction_explanations": []}
+        mock_api.bank_transaction.side_effect = lambda tid: dict(TXN) if tid == "5" else source
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9"])
+
+        assert result.exit_code != 0
+        assert "has no category to copy" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_like_with_split_categories_errors(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        source = {
+            "url": "/v2/bank_transactions/9", "dated_on": "2026-05-01",
+            "description": "MIXED",
+            "bank_transaction_explanations": [
+                {"url": "/v2/bank_transaction_explanations/8", "category": "/v2/categories/285"},
+                {"url": "/v2/bank_transaction_explanations/9", "category": "/v2/categories/286"},
+            ],
+        }
+        mock_api.bank_transaction.side_effect = lambda tid: dict(TXN) if tid == "5" else source
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9"])
+
+        assert result.exit_code != 0
+        assert "split across several categories" in result.output
+        assert "285 Accommodation and Meals" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_like_dedupes_repeated_category(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        source = {
+            "url": "/v2/bank_transactions/9", "dated_on": "2026-05-01",
+            "description": "SPLIT SAME",
+            "bank_transaction_explanations": [
+                {"url": "/v2/bank_transaction_explanations/8", "category": "/v2/categories/286"},
+                {"url": "/v2/bank_transaction_explanations/9", "category": "/v2/categories/286"},
+            ],
+        }
+        mock_api.bank_transaction.side_effect = lambda tid: dict(TXN) if tid == "5" else source
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9", "-y"])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["category"] == "/v2/categories/286"
+
+    def test_like_missing_source_transaction(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        mock_api.bank_transaction.side_effect = (
+            lambda tid: dict(TXN) if tid == "5" else (_ for _ in ()).throw(Exception("404"))
+        )
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "99"])
+
+        assert result.exit_code != 0
+        assert "Bank transaction '99' not found" in result.output
+
+    def test_category_and_like_together_rejected(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285", "--like", "9"])
+
+        assert result.exit_code != 0
+        assert "not both" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_neither_category_nor_like_rejected(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5"])
+
+        assert result.exit_code != 0
+        assert "Give a CATEGORY, or --like" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_like_respects_partial_amount(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+        source = {
+            "url": "/v2/bank_transactions/9", "dated_on": "2026-05-01",
+            "description": "STRIPE PAYOUT",
+            "bank_transaction_explanations": [
+                {"url": "/v2/bank_transaction_explanations/8", "category": "/v2/categories/286"},
+            ],
+        }
+        mock_api.bank_transaction.side_effect = lambda tid: dict(TXN) if tid == "5" else source
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "--like", "9", "--amount", "10", "-y"])
+
+        assert result.exit_code == 0
+        kwargs = mock_api.create_explanation.call_args.kwargs
+        assert kwargs["gross_value"] == "-10.00"
+        assert kwargs["category"] == "/v2/categories/286"
