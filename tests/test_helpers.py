@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from freeagent_cli.cli import _extract_id, format_hours, parse_hours
+from freeagent_cli.cli import (
+    _extract_id,
+    format_amount,
+    format_hours,
+    parse_amount,
+    parse_hours,
+)
 
 
 class TestParseHours:
@@ -81,3 +87,38 @@ class TestExtractId:
 
     def test_url_with_query(self):
         assert _extract_id("https://api.freeagent.com/v2/timeslips/42?nested=true") == "42?nested=true"
+
+
+class TestFormatAmount:
+    def test_two_decimal_places(self):
+        assert format_amount("-42.5") == "-42.50"
+        assert format_amount(1234.5) == "1234.50"
+        assert format_amount(0) == "0.00"
+
+    def test_no_thousands_separator(self):
+        assert format_amount(1234567.891) == "1234567.89"
+
+    def test_bad_input(self):
+        assert format_amount(None) == "None"
+
+
+class TestParseAmount:
+    def test_plain(self):
+        assert parse_amount("42.50") == 42.5
+        assert parse_amount("20") == 20.0
+
+    def test_strips_currency_and_commas(self):
+        assert parse_amount("£1,234.50") == 1234.5
+        assert parse_amount("$20.00") == 20.0
+        assert parse_amount("  €5  ") == 5.0
+
+    def test_discards_sign(self):
+        # `explain` takes the sign from the transaction, never from the user.
+        assert parse_amount("-20") == 20.0
+        assert parse_amount("+20") == 20.0
+
+    def test_invalid(self):
+        with pytest.raises(ValueError, match="Cannot parse amount"):
+            parse_amount("abc")
+        with pytest.raises(ValueError, match="Cannot parse amount"):
+            parse_amount("")

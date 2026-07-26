@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import math as _math
 import re
 
 import click
@@ -85,6 +86,55 @@ def _resolve(items: list[dict], query: str, label: str) -> dict:
     return matches[0]
 
 
+def _category_label(cat: dict) -> str:
+    return f"{cat.get('nominal_code','?')} {cat.get('description','?')}"
+
+
+def _pick_category(cats: list[dict], query: str) -> dict:
+    """Resolve a category by nominal code, URL, or description substring.
+
+    Kept separate from `_resolve` because categories key off `description`, and
+    because a company has ~100 of them — listing them all on a miss is useless,
+    so misses point at `categories --search` instead.
+    """
+    if query.startswith("http"):
+        match = [c for c in cats if c["url"] == query]
+        if match:
+            return match[0]
+    if query.isdigit():
+        match = [c for c in cats if c["url"].rsplit("/", 1)[-1] == query]
+        if match:
+            return match[0]
+    q = query.lower()
+    matches = [c for c in cats if q in (c.get("description") or "").lower()]
+    if not matches:
+        raise click.UsageError(
+            f"No category matches {query!r}. "
+            f"Browse with `freeagent-cli categories --search {query}`."
+        )
+    if len(matches) > 1:
+        shown = "; ".join(_category_label(c) for c in matches[:10])
+        more = f"; … and {len(matches) - 10} more" if len(matches) > 10 else ""
+        raise click.UsageError(
+            f"Multiple categories match {query!r}: {shown}{more}. "
+            "Use the nominal code to pick one."
+        )
+    return matches[0]
+
+
+def parse_amount(s: str) -> float:
+    """Parse a money amount, ignoring currency symbols, commas and sign.
+
+    The sign is discarded on purpose: `explain` always takes it from the
+    transaction, so a partial explanation can't flip money out into money in.
+    """
+    cleaned = re.sub(r"[^0-9.]", "", s)
+    try:
+        return abs(float(cleaned))
+    except ValueError:
+        raise ValueError(f"Cannot parse amount {s!r}; try 42.50")
+
+
 def _pick_task(tasks: list[dict], task_q: str | None, project_name: str) -> dict:
     if task_q:
         return _resolve(tasks, task_q, "task")
@@ -131,6 +181,8 @@ Typical flow:
 Banking:
   freeagent-cli accounts                          # bank accounts + balances
   freeagent-cli unexplained [--account <name>]    # transactions still needing an explanation
+  freeagent-cli categories --search travel        # find a category to explain against
+  freeagent-cli explain <txn> <category> [--dry-run]
 
 \b
 Examples:
@@ -402,6 +454,120 @@ def unexplained(account_q, days, limit):
     if len(shown) < len(txns):
         summary += f" (showing {len(shown)} — use -n 0 for all)"
     click.echo(summary, err=True)
+
+
+@main.command()
+@click.option("--search", "search", default=None, help="Filter by description substring.")
+@click.option("--group", "group", default=None,
+              help="Filter by group: admin_expenses, cost_of_sales, income, general.")
+def categories(search, group):
+    """List spending/income categories (nominal code, group, description)."""
+    api = _api()
+    cats = api.categories()
+    if group:
+        g = group.lower()
+        cats = [c for c in cats if g in c.get("group", "").lower()]
+    if search:
+        q = search.lower()
+        cats = [c for c in cats if q in (c.get("description") or "").lower()]
+    if not cats:
+        click.echo("(no matching categories)")
+        return
+    for c in cats:
+        click.echo(
+            f"{c.get('nominal_code','?')}\t{c.get('group','')}\t{c.get('description','?')}"
+        )
+
+
+@main.command()
+@click.argument("txn_q", metavar="TRANSACTION_ID_OR_URL")
+@click.argument("category_q", metavar="CATEGORY")
+@click.option("--amount", "amount_str", default=None,
+              help="Explain only part of it (default: the whole unexplained amount).")
+@click.option("--description", "description", default=None, help="Note on the explanation.")
+@click.option("--date", "date_", default=None,
+              help="YYYY-MM-DD (default: the transaction's own date).")
+@click.option("--dry-run", is_flag=True, help="Resolve and preview, but don't submit.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+def explain(txn_q, category_q, amount_str, description, date_, dry_run, yes):
+    """Explain a bank transaction: TRANSACTION CATEGORY.
+
+    \b
+    CATEGORY matches by nominal code, URL, or description substring.
+    Run `freeagent-cli categories --search travel` to find one.
+
+    \b
+    Examples:
+      freeagent-cli explain 12345 285
+      freeagent-cli explain 12345 "Accommodation and Meals" --description "client dinner"
+      freeagent-cli explain 12345 285 --amount 20 --dry-run
+
+    \b
+    VAT is left to FreeAgent's automatic rate for the category; this command
+    doesn't set sales-tax fields. Override in the web UI if you need to.
+    """
+    api = _api()
+    tid = _extract_id(txn_q)
+    try:
+        txn = api.bank_transaction(tid)
+    except Exception:
+        raise click.UsageError(f"Bank transaction {tid!r} not found.")
+
+    unexplained_amt = float(txn.get("unexplained_amount") or 0)
+    if unexplained_amt == 0:
+        raise click.UsageError(
+            f"Transaction {tid} has nothing left to explain."
+        )
+
+    if amount_str is None:
+        gross = unexplained_amt
+    else:
+        try:
+            magnitude = parse_amount(amount_str)
+        except ValueError as e:
+            raise click.UsageError(str(e))
+        if magnitude == 0:
+            raise click.UsageError("--amount must be non-zero.")
+        # Sign always comes from the transaction, never from the user.
+        gross = _math.copysign(magnitude, unexplained_amt)
+        if magnitude > abs(unexplained_amt) + 0.005:
+            raise click.UsageError(
+                f"--amount {format_amount(magnitude)} exceeds the "
+                f"{format_amount(abs(unexplained_amt))} still unexplained."
+            )
+
+    cat = _pick_category(api.categories(), category_q)
+    dated_on = date_ or txn.get("dated_on", "")
+
+    desc = (txn.get("description") or "").replace("\n", " ")
+    click.echo(f"Explain {txn.get('dated_on','?')}  {desc}")
+    click.echo(f"  Amount:   {format_amount(gross)} of "
+               f"{format_amount(unexplained_amt)} unexplained")
+    click.echo(f"  Category: {_category_label(cat)}")
+    click.echo(f"  Date:     {dated_on}")
+    if description:
+        click.echo(f"  Note:     {description}")
+    click.echo("  VAT:      FreeAgent's automatic rate for this category")
+
+    if dry_run:
+        click.echo("DRY RUN — nothing submitted.")
+        return
+
+    if not yes:
+        click.confirm("Submit this explanation?", abort=True)
+
+    result = api.create_explanation(
+        bank_transaction=txn["url"], dated_on=dated_on,
+        gross_value=f"{gross:.2f}", category=cat["url"], description=description,
+    )
+    remaining = unexplained_amt - gross
+    if abs(remaining) >= 0.005:
+        click.echo(f"Explained. {format_amount(remaining)} still unexplained.")
+    else:
+        click.echo("Explained.")
+    exp = result.get("bank_transaction_explanation", result)
+    if isinstance(exp, dict) and "url" in exp:
+        click.echo(exp["url"])
 
 
 def _is_partial(txn: dict) -> bool:

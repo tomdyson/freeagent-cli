@@ -432,3 +432,240 @@ class TestUnexplained:
 
         assert result.exit_code != 0
         assert "No bank account matches 'Nope'" in result.output
+
+
+CATEGORIES = [
+    {"url": "/v2/categories/285", "nominal_code": "285",
+     "description": "Accommodation and Meals", "group": "admin_expenses"},
+    {"url": "/v2/categories/286", "nominal_code": "286",
+     "description": "Travel", "group": "admin_expenses"},
+    {"url": "/v2/categories/001", "nominal_code": "001",
+     "description": "Sales", "group": "income"},
+]
+
+TXN = {
+    "url": "/v2/bank_transactions/5",
+    "dated_on": "2026-06-01",
+    "amount": "-42.5",
+    "unexplained_amount": "-42.5",
+    "description": "STRIPE PAYOUT",
+}
+
+
+def _mock_explain(api_mock, txn=None, categories=None):
+    api_mock.bank_transaction.return_value = dict(txn or TXN)
+    api_mock.categories.return_value = categories or CATEGORIES
+    api_mock.create_explanation.return_value = {
+        "bank_transaction_explanation": {"url": "/v2/bank_transaction_explanations/9"}
+    }
+
+
+class TestCategories:
+    def test_lists_all(self, runner, mock_config, mock_api):
+        mock_api.categories.return_value = CATEGORIES
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["categories"])
+
+        assert result.exit_code == 0
+        assert "285\tadmin_expenses\tAccommodation and Meals" in result.output
+
+    def test_search_filters(self, runner, mock_config, mock_api):
+        mock_api.categories.return_value = CATEGORIES
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["categories", "--search", "trav"])
+
+        assert result.exit_code == 0
+        assert "Travel" in result.output
+        assert "Sales" not in result.output
+
+    def test_group_filters(self, runner, mock_config, mock_api):
+        mock_api.categories.return_value = CATEGORIES
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["categories", "--group", "income"])
+
+        assert result.exit_code == 0
+        assert "Sales" in result.output
+        assert "Travel" not in result.output
+
+    def test_no_match(self, runner, mock_config, mock_api):
+        mock_api.categories.return_value = CATEGORIES
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["categories", "--search", "zzz"])
+
+        assert result.exit_code == 0
+        assert "(no matching categories)" in result.output
+
+
+class TestExplain:
+    def test_full_amount_by_default(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285"], input="y\n")
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs == {
+            "bank_transaction": "/v2/bank_transactions/5",
+            "dated_on": "2026-06-01",
+            "gross_value": "-42.50",
+            "category": "/v2/categories/285",
+            "description": None,
+        }
+        assert "Explained." in result.output
+
+    def test_partial_amount_keeps_transaction_sign(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            # A positive --amount on a money-out transaction must stay negative.
+            result = runner.invoke(main, ["explain", "5", "285", "--amount", "20"], input="y\n")
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["gross_value"] == "-20.00"
+        assert "-22.50 still unexplained" in result.output
+
+    def test_amount_strips_currency_symbols(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285", "--amount", "£20.00"], input="y\n")
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["gross_value"] == "-20.00"
+
+    def test_money_in_stays_positive(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api, txn={**TXN, "amount": "100.0", "unexplained_amount": "100.0"})
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "001", "--amount", "-40"], input="y\n")
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["gross_value"] == "40.00"
+
+    def test_amount_over_unexplained_rejected(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285", "--amount", "100"])
+
+        assert result.exit_code != 0
+        assert "exceeds the 42.50 still unexplained" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_fully_explained_transaction_rejected(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api, txn={**TXN, "unexplained_amount": "0.0"})
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285"])
+
+        assert result.exit_code != 0
+        assert "nothing left to explain" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_dry_run_submits_nothing(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "DRY RUN" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_declining_confirmation_submits_nothing(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "285"], input="n\n")
+
+        assert result.exit_code != 0
+        mock_api.create_explanation.assert_not_called()
+
+    def test_category_by_description(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "accommodation", "-y"])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["category"] == "/v2/categories/285"
+
+    def test_ambiguous_category_lists_codes(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api, categories=[
+            {"url": "/v2/categories/285", "nominal_code": "285",
+             "description": "Travel and Subsistence", "group": "admin_expenses"},
+            {"url": "/v2/categories/286", "nominal_code": "286",
+             "description": "Travel Insurance", "group": "admin_expenses"},
+        ])
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "travel"])
+
+        assert result.exit_code != 0
+        assert "285 Travel and Subsistence" in result.output
+        assert "286 Travel Insurance" in result.output
+        mock_api.create_explanation.assert_not_called()
+
+    def test_unknown_category_points_at_search(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "zzz"])
+
+        assert result.exit_code != 0
+        assert "categories --search zzz" in result.output
+
+    def test_leading_zero_nominal_code(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api, txn={**TXN, "amount": "100.0", "unexplained_amount": "100.0"})
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "5", "001", "-y"])
+
+        assert result.exit_code == 0
+        assert mock_api.create_explanation.call_args.kwargs["category"] == "/v2/categories/001"
+
+    def test_accepts_full_url_and_date_override(self, runner, mock_config, mock_api):
+        _mock_explain(mock_api)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, [
+                "explain", "https://api.freeagent.com/v2/bank_transactions/5",
+                "285", "--date", "2026-06-30", "--description", "note", "-y",
+            ])
+
+        assert result.exit_code == 0
+        mock_api.bank_transaction.assert_called_once_with("5")
+        kwargs = mock_api.create_explanation.call_args.kwargs
+        assert kwargs["dated_on"] == "2026-06-30"
+        assert kwargs["description"] == "note"
+
+    def test_missing_transaction(self, runner, mock_config, mock_api):
+        mock_api.bank_transaction.side_effect = Exception("404")
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["explain", "99", "285"])
+
+        assert result.exit_code != 0
+        assert "Bank transaction '99' not found" in result.output

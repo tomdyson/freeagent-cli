@@ -213,3 +213,93 @@ class TestDelete:
             result = api.delete("/v2/some/resource")
             assert result == {"status": "ok"}
             mock_client.delete.assert_called_once_with("/v2/some/resource")
+
+
+class TestCategories:
+    def test_flattens_groups_and_tags_them(self, api):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "admin_expenses_categories": [
+                {"url": "/v2/categories/285", "description": "Accommodation", "nominal_code": "285"},
+            ],
+            "income_categories": [
+                {"url": "/v2/categories/001", "description": "Sales", "nominal_code": "001"},
+            ],
+        }
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = mock_response
+
+        with patch.object(api, "_client", return_value=mock_client):
+            cats = api.categories()
+
+        assert [(c["nominal_code"], c["group"]) for c in cats] == [
+            ("285", "admin_expenses"), ("001", "income"),
+        ]
+
+    def test_ignores_non_category_keys(self, api):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "general_categories": [{"url": "/v2/categories/051", "description": "Interest",
+                                    "nominal_code": "051"}],
+            "meta": {"total": 1},
+        }
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = mock_response
+
+        with patch.object(api, "_client", return_value=mock_client):
+            assert len(api.categories()) == 1
+
+
+class TestCreateExplanation:
+    def test_body_shape(self, api):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "bank_transaction_explanation": {"url": "/v2/bank_transaction_explanations/9"}
+        }
+        mock_client.__enter__.return_value = mock_client
+        mock_client.post.return_value = mock_response
+
+        with patch.object(api, "_client", return_value=mock_client):
+            api.create_explanation(
+                bank_transaction="/v2/bank_transactions/5",
+                dated_on="2026-06-01",
+                gross_value="-42.50",
+                category="/v2/categories/285",
+                description="client dinner",
+            )
+
+        assert mock_client.post.call_args.args[0] == "/v2/bank_transaction_explanations"
+        assert mock_client.post.call_args.kwargs["json"] == {
+            "bank_transaction_explanation": {
+                "bank_transaction": "/v2/bank_transactions/5",
+                "dated_on": "2026-06-01",
+                "gross_value": "-42.50",
+                "category": "/v2/categories/285",
+                "description": "client dinner",
+            }
+        }
+
+    def test_omits_blank_description_and_sales_tax(self, api):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"bank_transaction_explanation": {}}
+        mock_client.__enter__.return_value = mock_client
+        mock_client.post.return_value = mock_response
+
+        with patch.object(api, "_client", return_value=mock_client):
+            api.create_explanation(
+                bank_transaction="/v2/bank_transactions/5", dated_on="2026-06-01",
+                gross_value="-42.50", category="/v2/categories/285",
+            )
+
+        body = mock_client.post.call_args.kwargs["json"]["bank_transaction_explanation"]
+        assert "description" not in body
+        # VAT is deliberately left to FreeAgent's automatic rate.
+        assert not any(k.startswith("sales_tax") for k in body)
