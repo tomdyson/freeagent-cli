@@ -143,6 +143,51 @@ def _pick_category(cats: list[dict], query: str) -> dict:
     return matches[0]
 
 
+def _categories_used_by(api, txn: dict) -> list[str]:
+    """Distinct category URLs across a transaction's existing explanations.
+
+    Nested explanations can arrive abridged — carrying `entry_type` but no
+    `category` URL — so fall back to fetching the full explanation object.
+    Order is preserved so error messages read predictably.
+    """
+    urls: list[str] = []
+    for exp in txn.get("bank_transaction_explanations") or []:
+        if not isinstance(exp, dict):
+            continue
+        cat = exp.get("category")
+        if not cat and exp.get("url"):
+            cat = api.explanation(_extract_id(exp["url"])).get("category")
+        if cat and cat not in urls:
+            urls.append(cat)
+    return urls
+
+
+def _category_like(api, like_q: str, cats: list[dict]) -> tuple[dict, dict]:
+    """Resolve the category used by another transaction. Returns (category, source txn)."""
+    source_id = _extract_id(like_q)
+    source = _fetch_txn(api, source_id)
+    used = _categories_used_by(api, source)
+    by_url = {c["url"]: c for c in cats}
+
+    if not used:
+        raise click.UsageError(
+            f"Transaction {source_id} has no category to copy. "
+            "Invoice payments, bill payments and transfers aren't categorised, "
+            "so --like can't read one from them."
+        )
+    if len(used) > 1:
+        shown = "; ".join(_category_label(by_url.get(u, {"description": u})) for u in used)
+        raise click.UsageError(
+            f"Transaction {source_id} is split across several categories: {shown}. "
+            "Pass a CATEGORY explicitly."
+        )
+
+    url = used[0]
+    # A category can be missing from the list if it's been archived since.
+    return by_url.get(url, {"url": url, "nominal_code": _extract_id(url),
+                            "description": "(unlisted category)"}), source
+
+
 def parse_amount(s: str) -> float:
     """Parse a money amount, ignoring currency symbols, commas and sign.
 
@@ -204,6 +249,7 @@ Banking:
   freeagent-cli unexplained [--account <name>]    # transactions still needing an explanation
   freeagent-cli categories --search travel        # find a category to explain against
   freeagent-cli explain <txn> <category> [--dry-run]
+  freeagent-cli explain <txn> --like <other txn>  # reuse a category for a recurring payee
 
 \b
 Examples:
@@ -502,7 +548,9 @@ def categories(search, group):
 
 @main.command()
 @click.argument("txn_q", metavar="TRANSACTION_ID_OR_URL")
-@click.argument("category_q", metavar="CATEGORY")
+@click.argument("category_q", metavar="[CATEGORY]", required=False)
+@click.option("--like", "like_q", default=None, metavar="TRANSACTION",
+              help="Reuse the category from another transaction, instead of CATEGORY.")
 @click.option("--amount", "amount_str", default=None,
               help="Explain only part of it (default: the whole unexplained amount).")
 @click.option("--description", "description", default=None, help="Note on the explanation.")
@@ -510,7 +558,7 @@ def categories(search, group):
               help="YYYY-MM-DD (default: the transaction's own date).")
 @click.option("--dry-run", is_flag=True, help="Resolve and preview, but don't submit.")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
-def explain(txn_q, category_q, amount_str, description, date_, dry_run, yes):
+def explain(txn_q, category_q, like_q, amount_str, description, date_, dry_run, yes):
     """Explain a bank transaction: TRANSACTION CATEGORY.
 
     \b
@@ -518,15 +566,29 @@ def explain(txn_q, category_q, amount_str, description, date_, dry_run, yes):
     Run `freeagent-cli categories --search travel` to find one.
 
     \b
+    Instead of CATEGORY, --like reuses the category from a transaction you've
+    already explained — handy for a payee that recurs every month. The
+    `similar` column in `unexplained` tells you when that's likely to help.
+
+    \b
     Examples:
       freeagent-cli explain 12345 285
       freeagent-cli explain 12345 "Accommodation and Meals" --description "client dinner"
       freeagent-cli explain 12345 285 --amount 20 --dry-run
+      freeagent-cli explain 12345 --like 9999
 
     \b
     VAT is left to FreeAgent's automatic rate for the category; this command
     doesn't set sales-tax fields. Override in the web UI if you need to.
     """
+    if category_q and like_q:
+        raise click.UsageError("Use CATEGORY or --like, not both.")
+    if not category_q and not like_q:
+        raise click.UsageError(
+            "Give a CATEGORY, or --like <transaction> to copy one. "
+            "Browse with `freeagent-cli categories --search <text>`."
+        )
+
     api = _api()
     tid = _extract_id(txn_q)
     txn = _fetch_txn(api, tid)
@@ -554,14 +616,21 @@ def explain(txn_q, category_q, amount_str, description, date_, dry_run, yes):
                 f"{format_amount(abs(unexplained_amt))} still unexplained."
             )
 
-    cat = _pick_category(api.categories(), category_q)
+    cats = api.categories()
+    if like_q:
+        cat, source = _category_like(api, like_q, cats)
+        source_desc = (source.get("description") or "").replace("\n", " ")
+        provenance = f"  (from {source.get('dated_on','?')} {source_desc})"
+    else:
+        cat = _pick_category(cats, category_q)
+        provenance = ""
     dated_on = date_ or txn.get("dated_on", "")
 
     desc = (txn.get("description") or "").replace("\n", " ")
     click.echo(f"Explain {txn.get('dated_on','?')}  {desc}")
     click.echo(f"  Amount:   {format_amount(gross)} of "
                f"{format_amount(unexplained_amt)} unexplained")
-    click.echo(f"  Category: {_category_label(cat)}")
+    click.echo(f"  Category: {_category_label(cat)}{provenance}")
     click.echo(f"  Date:     {dated_on}")
     if description:
         click.echo(f"  Note:     {description}")

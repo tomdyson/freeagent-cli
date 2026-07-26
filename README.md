@@ -95,6 +95,7 @@ freeagent-cli explain 12345 285 --amount 20                # explain part of it
 `categories` lists nominal code, group and description, one per line. Filter with `--search` or `--group` (`admin_expenses`, `cost_of_sales`, `income`, `general`).
 
 - **CATEGORY** matches by nominal code (`285`), full URL, or case-insensitive description substring. An ambiguous match lists the candidates with their codes.
+- **`--like <transaction>`** reuses the category from a transaction you've already explained, instead of naming one. See below.
 - **`--amount`** explains part of a transaction; it defaults to the whole unexplained amount and can't exceed it. Currency symbols and commas are ignored.
 - **The sign always comes from the transaction**, so `--amount 20` on a payment of `-42.50` explains `-20.00`. You can't accidentally book a spend as income.
 - **`--date`** defaults to the transaction's own date.
@@ -102,11 +103,27 @@ freeagent-cli explain 12345 285 --amount 20                # explain part of it
 
 **VAT:** `explain` doesn't set sales-tax fields, so FreeAgent applies the category's automatic rate. If a transaction needs a non-standard rate, EC status, or a manual VAT amount, do that one in the web UI.
 
+### Recurring payees
+
+Most of a backlog is the same handful of payees every month. `--like` copies the category from a transaction you've already explained, so you don't have to remember which one it was:
+
+```
+freeagent-cli explain 12345 --like 9999
+```
+
+The `similar` column in `unexplained` (from `matching_transactions_count`) tells you when a transaction has precedent worth copying.
+
+`--like` reads the category and nothing else — the amount, date and description still come from the transaction being explained, or from your flags. It refuses rather than guesses when there's no single answer:
+
+- The source has no category — invoice payments, bill payments and transfers aren't categorised.
+- The source is split across several categories, in which case the error lists them so you can pick one.
+
 A typical backlog session:
 
 ```
 freeagent-cli unexplained
 freeagent-cli explain 12345 285 --description "client dinner"
+freeagent-cli explain 12346 --like 12345
 ```
 
 ## License
