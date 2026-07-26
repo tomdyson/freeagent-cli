@@ -1,5 +1,7 @@
 # freeagent-cli
 
+[![CI](https://github.com/tomdyson/freeagent-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/tomdyson/freeagent-cli/actions/workflows/ci.yml)
+
 A small CLI for submitting FreeAgent timeslips without clicking through the web UI.
 
 ```
