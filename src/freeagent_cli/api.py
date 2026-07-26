@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from . import __version__
-from . import auth
+from . import __version__, auth
 from . import config as cfg
 
 #: FreeAgent caps per_page at 100; asking for the maximum keeps round trips down.

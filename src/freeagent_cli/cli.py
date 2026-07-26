@@ -100,18 +100,18 @@ def _fetch(fetch, record_id: str, label: str, *, scope: str | None = None) -> di
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         if status == 404:
-            raise click.UsageError(f"{label} {record_id!r} not found.")
+            raise click.UsageError(f"{label} {record_id!r} not found.") from e
         if status in (401, 403):
             hint = f", and that your app has {scope} access" if scope else ""
             raise click.UsageError(
                 f"FreeAgent refused the request ({status}). "
                 f"Check `freeagent-cli auth status`{hint}."
-            )
+            ) from e
         raise click.UsageError(
             f"FreeAgent returned {status} for {label.lower()} {record_id}."
-        )
+        ) from e
     except httpx.RequestError as e:
-        raise click.UsageError(f"Could not reach FreeAgent: {e}")
+        raise click.UsageError(f"Could not reach FreeAgent: {e}") from e
 
 
 def _fetch_txn(api, txn_id: str) -> dict:
@@ -211,7 +211,7 @@ def parse_amount(s: str) -> float:
     try:
         return abs(float(cleaned))
     except ValueError:
-        raise ValueError(f"Cannot parse amount {s!r}; try 42.50")
+        raise ValueError(f"Cannot parse amount {s!r}; try 42.50") from None
 
 
 def _pick_task(tasks: list[dict], task_q: str | None, project_name: str) -> dict:
@@ -402,7 +402,7 @@ def log(project_q, duration, comment_parts, task_q, date_, dry_run):
     try:
         hours = parse_hours(duration)
     except ValueError as e:
-        raise click.UsageError(str(e))
+        raise click.UsageError(str(e)) from e
     comment = " ".join(comment_parts) if comment_parts else None
 
     api = _api()
@@ -411,7 +411,10 @@ def log(project_q, duration, comment_parts, task_q, date_, dry_run):
     dated_on = date_ or _dt.date.today().isoformat()
 
     if dry_run:
-        click.echo(f"DRY RUN — would submit {format_hours(hours)} on {dated_on} → {project['name']} / {task['name']}")
+        click.echo(
+            f"DRY RUN — would submit {format_hours(hours)} on {dated_on} "
+            f"→ {project['name']} / {task['name']}"
+        )
         click.echo(f"  project: {project['url']}")
         click.echo(f"  task:    {task['url']}")
         if comment:
@@ -618,7 +621,7 @@ def explain(txn_q, category_q, like_q, amount_str, description, date_, dry_run, 
         try:
             magnitude = parse_amount(amount_str)
         except ValueError as e:
-            raise click.UsageError(str(e))
+            raise click.UsageError(str(e)) from e
         if magnitude == 0:
             raise click.UsageError("--amount must be non-zero.")
         # Sign always comes from the transaction, never from the user.
@@ -797,7 +800,7 @@ def edit(timeslip_q, project_q, task_q, duration_str, date_, comment, dry_run, y
         try:
             new_hours = parse_hours(duration_str)
         except ValueError as e:
-            raise click.UsageError(str(e))
+            raise click.UsageError(str(e)) from e
 
     if date_:
         new_date = date_
@@ -811,7 +814,7 @@ def edit(timeslip_q, project_q, task_q, duration_str, date_, comment, dry_run, y
     lines.append(f"  Task:     {old_tname} → {new_tname}")
     lines.append(f"  Date:     {old.get('dated_on','?')} → {new_date}")
     lines.append(f"  Duration: {format_hours(old.get('hours'))} → {format_hours(new_hours)}")
-    lines.append(f"  Comment:  {repr(old.get('comment') or '')} → {repr(new_comment)}")
+    lines.append(f"  Comment:  {old.get('comment') or ''!r} → {new_comment!r}")
     click.echo("\n".join(lines))
 
     if dry_run:
