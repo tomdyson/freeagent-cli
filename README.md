@@ -43,6 +43,8 @@ freeagent-cli --help                                       # canonical flow
 freeagent-cli recent                                       # what you've already logged (run this first to avoid duplicates)
 freeagent-cli log <project> <duration> [comment...]        # submit a timeslip
 freeagent-cli projects                                     # first-time / discovery: projects + tasks in one call
+freeagent-cli accounts                                     # bank accounts + balances
+freeagent-cli unexplained                                  # bank transactions still needing an explanation
 ```
 
 Examples:
@@ -60,6 +62,26 @@ freeagent-cli log Acme 1.5 --dry-run                       # preview, don't subm
 - **`--date`** defaults to today (ISO `YYYY-MM-DD` to override).
 - **`--dry-run`** resolves the project/task/date and prints the would-be submission without sending it.
 - **`projects --flat`** emits one project/task pair per line (tab-separated) for grep/awk.
+
+## Banking
+
+```
+freeagent-cli accounts                                     # id, name, currency, balance
+freeagent-cli unexplained                                  # what still needs explaining
+freeagent-cli unexplained --account Current --days 365
+freeagent-cli unexplained -n 0 | grep -i stripe            # the whole backlog, filtered
+```
+
+`unexplained` prints one tab-separated transaction per line — date, unexplained amount, description, count of similar transactions, marker, URL — most recent first. The marker reads `partial` when only part of a transaction has been explained.
+
+- **`--account`** is optional if you have a single active bank account; otherwise the error lists the choices. Matches by name substring, id, or URL, like `--project`.
+- **`--days`** defaults to 90. Pass `0` for no date limit.
+- **`-n`** defaults to 25. Pass `0` for all.
+- A summary (count and total) goes to **stderr**, so piping stdout into `grep`/`awk` stays clean.
+
+Hidden accounts are excluded from both commands; `accounts --all` includes them.
+
+Explaining transactions isn't supported yet — this is a read-only view of the backlog.
 
 ## License
 
