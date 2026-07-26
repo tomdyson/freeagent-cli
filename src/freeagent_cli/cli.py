@@ -57,6 +57,14 @@ def format_hours(value) -> str:
     return f"{h}h{m}m"
 
 
+def format_amount(value) -> str:
+    """Format a money value as a plain signed decimal (no thousands separator, for awk)."""
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _resolve(items: list[dict], query: str, label: str) -> dict:
     if query.startswith("http"):
         match = [i for i in items if i["url"] == query]
@@ -90,12 +98,39 @@ def _pick_task(tasks: list[dict], task_q: str | None, project_name: str) -> dict
     )
 
 
+def _active_accounts(accounts: list[dict]) -> list[dict]:
+    """Drop hidden accounts. Treat a missing status as active."""
+    return [a for a in accounts if (a.get("status") or "active").lower() != "hidden"]
+
+
+def _pick_account(accounts: list[dict], account_q: str | None) -> dict:
+    """Resolve --account, or fall back to the only active account.
+
+    An explicitly named account resolves against every account, so you can still
+    reach a hidden one; the implicit default only ever considers active accounts.
+    """
+    if account_q:
+        return _resolve(accounts, account_q, "bank account")
+    active = _active_accounts(accounts)
+    if not active:
+        raise click.UsageError("No active bank accounts found.")
+    if len(active) == 1:
+        return active[0]
+    names = ", ".join(a["name"] for a in active)
+    raise click.UsageError(f"--account required. Available: {names}")
+
+
 @click.group(epilog="""
 \b
 Typical flow:
   freeagent-cli recent                            # check what you've already logged (avoids duplicates)
   freeagent-cli log <project> <duration> [comment]  [--task <name>] [--dry-run]
   freeagent-cli projects                          # first-time / discovery: projects + tasks
+
+\b
+Banking:
+  freeagent-cli accounts                          # bank accounts + balances
+  freeagent-cli unexplained [--account <name>]    # transactions still needing an explanation
 
 \b
 Examples:
@@ -288,6 +323,109 @@ def recent(limit, days, all_users):
         tname = task_["name"] if isinstance(task_, dict) else "?"
         comment = (s.get("comment") or "").replace("\n", " ")
         click.echo(f"{s.get('dated_on','?')}\t{format_hours(s.get('hours'))}\t{pname}\t{tname}\t{comment}\t{s.get('url','')}")
+
+
+# -- banking -------------------------------------------------------------
+
+@main.command()
+@click.option("--all", "show_all", is_flag=True, help="Include hidden accounts.")
+def accounts(show_all):
+    """List bank accounts (id, name, currency, balance)."""
+    api = _api()
+    accs = api.bank_accounts()
+    if not show_all:
+        accs = _active_accounts(accs)
+    if not accs:
+        click.echo("(no bank accounts)")
+        return
+    for a in accs:
+        aid = a["url"].rsplit("/", 1)[-1]
+        click.echo(
+            f"{aid}\t{a.get('name','?')}\t{a.get('currency','')}\t"
+            f"{format_amount(a.get('current_balance'))}"
+        )
+
+
+@main.command()
+@click.option("--account", "account_q", default=None,
+              help="Bank account name substring, id, or URL. Optional if you have one account.")
+@click.option("--days", default=90, show_default=True,
+              help="Look back this many days (0 for no date limit).")
+@click.option("-n", "limit", default=25, show_default=True,
+              help="How many to show (0 for all).")
+def unexplained(account_q, days, limit):
+    """Show unexplained bank transactions (most recent first).
+
+    \b
+    Output is tab-separated: date, unexplained amount, description, count of
+    similar transactions, marker, URL. The marker reads `partial` when only
+    part of the transaction has been explained. A summary goes to stderr, so
+    piping stdout stays clean.
+
+    \b
+    Examples:
+      freeagent-cli unexplained
+      freeagent-cli unexplained --account Current --days 365
+      freeagent-cli unexplained -n 0 | grep -i stripe
+    """
+    api = _api()
+    account = _pick_account(api.bank_accounts(), account_q)
+    from_date = (
+        (_dt.date.today() - _dt.timedelta(days=days)).isoformat() if days else None
+    )
+    txns = api.bank_transactions(
+        bank_account=account["url"], view="unexplained", from_date=from_date,
+    )
+    txns.sort(key=lambda t: (t.get("dated_on", ""), t.get("created_at", "")), reverse=True)
+
+    if not txns:
+        window = f" in the last {days} days" if days else ""
+        click.echo(f"(nothing unexplained on {account['name']}{window})")
+        return
+
+    shown = txns if limit == 0 else txns[:limit]
+    for t in shown:
+        unex = t.get("unexplained_amount", t.get("amount"))
+        desc = (t.get("description") or "").replace("\n", " ").replace("\t", " ")
+        similar = t.get("matching_transactions_count") or 0
+        marker = "partial" if _is_partial(t) else ""
+        click.echo(
+            f"{t.get('dated_on','?')}\t{format_amount(unex)}\t{desc}\t"
+            f"{similar}\t{marker}\t{t.get('url','')}"
+        )
+
+    total = sum(_unexplained_value(t) for t in txns)
+    summary = (
+        f"{len(txns)} unexplained on {account['name']}, "
+        f"total {format_amount(total)} {account.get('currency','')}".rstrip()
+    )
+    if len(shown) < len(txns):
+        summary += f" (showing {len(shown)} — use -n 0 for all)"
+    click.echo(summary, err=True)
+
+
+def _unexplained_value(txn: dict) -> float:
+    """The still-unexplained amount as a float, falling back to the full amount.
+
+    Junk counts as 0.0 rather than raising: `format_amount` already degrades to
+    printing the raw value per line, so the summary shouldn't be the one thing
+    that aborts the command after the table has been printed.
+    """
+    raw = txn.get("unexplained_amount")
+    if raw is None or raw == "":
+        raw = txn.get("amount")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_partial(txn: dict) -> bool:
+    """True when some of the transaction is explained and some isn't."""
+    try:
+        return float(txn["unexplained_amount"]) != float(txn["amount"])
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 # -- delete --------------------------------------------------------------

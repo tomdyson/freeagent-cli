@@ -279,3 +279,194 @@ class TestRecent:
             result = runner.invoke(main, ["recent"])
             assert result.exit_code == 0
             assert "/v2/timeslips/42" in result.output
+
+
+ACCOUNTS = [
+    {"url": "/v2/bank_accounts/1", "name": "Current", "currency": "GBP",
+     "current_balance": "1234.5", "status": "Active"},
+    {"url": "/v2/bank_accounts/2", "name": "Savings", "currency": "GBP",
+     "current_balance": "10.0", "status": "Active"},
+    {"url": "/v2/bank_accounts/3", "name": "Old Card", "currency": "GBP",
+     "current_balance": "0.0", "status": "Hidden"},
+]
+
+
+class TestAccounts:
+    def test_lists_active_only(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = ACCOUNTS
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["accounts"])
+
+        assert result.exit_code == 0
+        assert "1\tCurrent\tGBP\t1234.50" in result.output
+        assert "Old Card" not in result.output
+
+    def test_all_includes_hidden(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = ACCOUNTS
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["accounts", "--all"])
+
+        assert result.exit_code == 0
+        assert "Old Card" in result.output
+
+    def test_no_accounts(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = []
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["accounts"])
+
+        assert result.exit_code == 0
+        assert "(no bank accounts)" in result.output
+
+
+class TestUnexplained:
+    def test_requires_account_when_ambiguous(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = ACCOUNTS
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code != 0
+        assert "--account required" in result.output
+        assert "Current, Savings" in result.output
+
+    def test_single_account_is_implicit(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = []
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        assert "nothing unexplained on Current" in result.output
+        assert mock_api.bank_transactions.call_args.kwargs["view"] == "unexplained"
+
+    def test_lists_most_recent_first_with_summary(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = ACCOUNTS
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-05-01",
+             "amount": "-20.0", "unexplained_amount": "-20.0",
+             "description": "Older", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/2", "dated_on": "2026-06-01",
+             "amount": "-42.5", "unexplained_amount": "-42.5",
+             "description": "Newer", "matching_transactions_count": 3},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained", "--account", "Current"])
+
+        assert result.exit_code == 0
+        lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        assert lines[0].startswith("2026-06-01\t-42.50\tNewer\t3\t")
+        assert lines[1].startswith("2026-05-01\t-20.00\tOlder\t0\t")
+        assert "2 unexplained on Current, total -62.50 GBP" in result.stderr
+
+    def test_partial_marker(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-100.0", "unexplained_amount": "-40.0",
+             "description": "Part done", "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        assert "-40.00\tPart done\t0\tpartial\t" in result.stdout
+
+    def test_limit_truncates_and_says_so(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": f"/v2/bank_transactions/{i}", "dated_on": f"2026-06-{i:02d}",
+             "amount": "-1.0", "unexplained_amount": "-1.0",
+             "description": f"txn {i}", "matching_transactions_count": 0}
+            for i in range(1, 11)
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained", "-n", "3"])
+
+        assert result.exit_code == 0
+        assert len([ln for ln in result.stdout.splitlines() if ln.strip()]) == 3
+        assert "showing 3 — use -n 0 for all" in result.stderr
+
+    def test_days_zero_means_no_date_filter(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = []
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained", "--days", "0"])
+
+        assert result.exit_code == 0
+        assert mock_api.bank_transactions.call_args.kwargs["from_date"] is None
+
+    def test_named_hidden_account_still_resolves(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = ACCOUNTS
+        mock_api.bank_transactions.return_value = []
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained", "--account", "Old Card"])
+
+        assert result.exit_code == 0
+        assert mock_api.bank_transactions.call_args.kwargs["bank_account"] == "/v2/bank_accounts/3"
+
+    def test_unknown_account_lists_choices(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = ACCOUNTS
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained", "--account", "Nope"])
+
+        assert result.exit_code != 0
+        assert "No bank account matches 'Nope'" in result.output
+
+    def test_summary_survives_junk_amounts(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-20.0", "unexplained_amount": "-20.0",
+             "description": "Fine", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/2", "dated_on": "2026-06-02",
+             "amount": None, "unexplained_amount": None,
+             "description": "Null amount", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/3", "dated_on": "2026-06-03",
+             "amount": "N/A", "unexplained_amount": "",
+             "description": "Junk amount", "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        # All three rows still print, and the total ignores what it can't parse.
+        assert len([ln for ln in result.stdout.splitlines() if ln.strip()]) == 3
+        assert "total -20.00 GBP" in result.stderr
+
+    def test_unexplained_amount_falls_back_to_amount(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-30.0", "description": "No unexplained field",
+             "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        assert "total -30.00 GBP" in result.stderr

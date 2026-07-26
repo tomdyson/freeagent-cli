@@ -25,6 +25,110 @@ def api(config):
     return FreeAgent(config)
 
 
+def _page(items_key, items, next_url=None):
+    """A mock response for one page of a list endpoint."""
+    r = MagicMock()
+    r.raise_for_status.return_value = None
+    r.json.return_value = {items_key: items}
+    r.links = {"next": {"url": next_url}} if next_url else {}
+    return r
+
+
+class TestGetAll:
+    def test_single_page(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = _page("projects", [{"name": "Acme"}])
+
+        with patch.object(api, "_client", return_value=mock_client):
+            assert api.get_all("/v2/projects", "projects") == [{"name": "Acme"}]
+
+        mock_client.get.assert_called_once_with("/v2/projects", params={"per_page": 100})
+
+    def test_follows_next_link(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.side_effect = [
+            _page("projects", [{"name": "A"}], next_url="https://api.freeagent.com/v2/projects?page=2"),
+            _page("projects", [{"name": "B"}], next_url="https://api.freeagent.com/v2/projects?page=3"),
+            _page("projects", [{"name": "C"}]),
+        ]
+
+        with patch.object(api, "_client", return_value=mock_client):
+            result = api.get_all("/v2/projects", "projects", view="active")
+
+        assert [p["name"] for p in result] == ["A", "B", "C"]
+        assert mock_client.get.call_count == 3
+        # First call carries params; subsequent calls use the next URL verbatim.
+        first, second, third = mock_client.get.call_args_list
+        assert first.args[0] == "/v2/projects"
+        assert first.kwargs["params"] == {"view": "active", "per_page": 100}
+        assert second.args[0] == "https://api.freeagent.com/v2/projects?page=2"
+        assert second.kwargs["params"] is None
+        assert third.args[0] == "https://api.freeagent.com/v2/projects?page=3"
+
+    def test_drops_none_params(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = _page("timeslips", [])
+
+        with patch.object(api, "_client", return_value=mock_client):
+            api.get_all("/v2/timeslips", "timeslips", from_date="2026-01-01", user=None)
+
+        assert mock_client.get.call_args.kwargs["params"] == {
+            "from_date": "2026-01-01", "per_page": 100,
+        }
+
+    def test_missing_key_yields_empty(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = _page("something_else", [{"a": 1}])
+
+        with patch.object(api, "_client", return_value=mock_client):
+            assert api.get_all("/v2/projects", "projects") == []
+
+    def test_runaway_link_chain_raises(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        # Every page claims there's another one.
+        mock_client.get.return_value = _page("projects", [{"name": "A"}], next_url="/v2/projects?page=2")
+
+        with patch.object(api, "_client", return_value=mock_client):
+            with pytest.raises(RuntimeError, match="Stopped after 100 pages"):
+                api.get_all("/v2/projects", "projects")
+
+
+class TestBanking:
+    def test_bank_accounts(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = _page(
+            "bank_accounts", [{"name": "Current", "url": "/v2/bank_accounts/1"}]
+        )
+
+        with patch.object(api, "_client", return_value=mock_client):
+            assert api.bank_accounts()[0]["name"] == "Current"
+
+        mock_client.get.assert_called_once_with("/v2/bank_accounts", params={"per_page": 100})
+
+    def test_bank_transactions_passes_required_account(self, api):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = _page("bank_transactions", [])
+
+        with patch.object(api, "_client", return_value=mock_client):
+            api.bank_transactions(
+                bank_account="/v2/bank_accounts/1", view="unexplained", from_date="2026-01-01",
+            )
+
+        assert mock_client.get.call_args.kwargs["params"] == {
+            "bank_account": "/v2/bank_accounts/1",
+            "view": "unexplained",
+            "from_date": "2026-01-01",
+            "per_page": 100,
+        }
+
+
 class TestDeleteTimeslip:
     def test_delete_success(self, api):
         mock_client = MagicMock()
