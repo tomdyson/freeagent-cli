@@ -126,7 +126,7 @@ class TestDelete:
 
     def test_delete_already_deleted(self, runner, mock_config, mock_api):
         _mock_api_and_config(mock_api, mock_config)
-        mock_api.get_timeslip.side_effect = Exception("not found")
+        mock_api.get_timeslip.side_effect = _http_error(404)
 
         with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
              patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
@@ -244,7 +244,7 @@ class TestEdit:
 
     def test_edit_timeslip_not_found(self, runner, mock_config, mock_api):
         _mock_api_and_config(mock_api, mock_config)
-        mock_api.get_timeslip.side_effect = Exception("not found")
+        mock_api.get_timeslip.side_effect = _http_error(404)
 
         with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
              patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
@@ -955,3 +955,64 @@ class TestExplain:
 
         assert result.exit_code == 0
         assert mock_api.create_explanation.call_args.kwargs["gross_value"] == "-42.50"
+
+
+class TestTimeslipFetchErrors:
+    """delete/edit share _fetch with the banking commands (see _fetch_timeslip)."""
+
+    @pytest.mark.parametrize("command", [
+        ["delete", "42"],
+        ["edit", "42", "--duration", "2h"],
+    ])
+    def test_auth_failure_is_not_reported_as_missing(self, runner, mock_config,
+                                                     mock_api, command):
+        _mock_api_and_config(mock_api, mock_config)
+        mock_api.get_timeslip.side_effect = _http_error(401)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, command)
+
+        assert result.exit_code != 0
+        assert "not found" not in result.output
+        assert "auth status" in result.output
+
+    @pytest.mark.parametrize("command", [
+        ["delete", "42"],
+        ["edit", "42", "--duration", "2h"],
+    ])
+    def test_server_error_is_not_reported_as_missing(self, runner, mock_config,
+                                                     mock_api, command):
+        _mock_api_and_config(mock_api, mock_config)
+        mock_api.get_timeslip.side_effect = _http_error(500)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, command)
+
+        assert result.exit_code != 0
+        assert "not found" not in result.output
+        assert "returned 500" in result.output
+
+    def test_connection_failure_is_not_reported_as_missing(self, runner, mock_config,
+                                                           mock_api):
+        _mock_api_and_config(mock_api, mock_config)
+        mock_api.get_timeslip.side_effect = httpx.ConnectError("no route")
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["delete", "42"])
+
+        assert result.exit_code != 0
+        assert "Could not reach FreeAgent" in result.output
+
+    def test_missing_timeslip_still_reads_as_not_found(self, runner, mock_config, mock_api):
+        _mock_api_and_config(mock_api, mock_config)
+        mock_api.get_timeslip.side_effect = _http_error(404)
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["delete", "42"])
+
+        assert result.exit_code != 0
+        assert "Timeslip '42' not found" in result.output

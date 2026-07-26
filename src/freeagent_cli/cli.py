@@ -87,26 +87,39 @@ def _resolve(items: list[dict], query: str, label: str) -> dict:
     return matches[0]
 
 
-def _fetch_txn(api, txn_id: str) -> dict:
-    """Fetch a bank transaction, distinguishing "missing" from "went wrong".
+def _fetch(fetch, record_id: str, label: str, *, scope: str | None = None) -> dict:
+    """Fetch one record, distinguishing "missing" from "went wrong".
 
-    A bare `except Exception` here would report an expired token or a 500 as
-    "not found", sending you after the wrong problem.
+    A bare `except Exception` reports an expired token or a 500 as "not found",
+    which sends you after the wrong problem. `scope` names the FreeAgent
+    permission worth checking when access is refused, where there's an obvious
+    one to name.
     """
     try:
-        return api.bank_transaction(txn_id)
+        return fetch(record_id)
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         if status == 404:
-            raise click.UsageError(f"Bank transaction {txn_id!r} not found.")
+            raise click.UsageError(f"{label} {record_id!r} not found.")
         if status in (401, 403):
+            hint = f", and that your app has {scope} access" if scope else ""
             raise click.UsageError(
                 f"FreeAgent refused the request ({status}). "
-                "Check `freeagent-cli auth status`, and that your app has Banking access."
+                f"Check `freeagent-cli auth status`{hint}."
             )
-        raise click.UsageError(f"FreeAgent returned {status} for transaction {txn_id}.")
+        raise click.UsageError(
+            f"FreeAgent returned {status} for {label.lower()} {record_id}."
+        )
     except httpx.RequestError as e:
         raise click.UsageError(f"Could not reach FreeAgent: {e}")
+
+
+def _fetch_txn(api, txn_id: str) -> dict:
+    return _fetch(api.bank_transaction, txn_id, "Bank transaction", scope="Banking")
+
+
+def _fetch_timeslip(api, timeslip_id: str) -> dict:
+    return _fetch(api.get_timeslip, timeslip_id, "Timeslip")
 
 
 def _category_label(cat: dict) -> str:
@@ -690,10 +703,7 @@ def delete(timeslip_q, yes):
     """Delete a timeslip by numeric ID or full URL."""
     api = _api()
     tid = _extract_id(timeslip_q)
-    try:
-        ts = api.get_timeslip(tid)
-    except Exception:
-        raise click.UsageError(f"Timeslip {tid!r} not found.")
+    ts = _fetch_timeslip(api, tid)
     proj = ts.get("project")
     task_ = ts.get("task")
     pname = proj["name"] if isinstance(proj, dict) else "?"
@@ -742,10 +752,7 @@ def edit(timeslip_q, project_q, task_q, duration_str, date_, comment, dry_run, y
     """
     api = _api()
     tid = _extract_id(timeslip_q)
-    try:
-        old = api.get_timeslip(tid)
-    except Exception:
-        raise click.UsageError(f"Timeslip {tid!r} not found.")
+    old = _fetch_timeslip(api, tid)
 
     if not any([project_q, task_q, duration_str, date_, comment is not None]):
         raise click.UsageError("Nothing to change. Use --help to see options.")
