@@ -394,7 +394,7 @@ def unexplained(account_q, days, limit):
             f"{similar}\t{marker}\t{t.get('url','')}"
         )
 
-    total = sum(float(t.get("unexplained_amount") or t.get("amount") or 0) for t in txns)
+    total = sum(_unexplained_value(t) for t in txns)
     summary = (
         f"{len(txns)} unexplained on {account['name']}, "
         f"total {format_amount(total)} {account.get('currency','')}".rstrip()
@@ -402,6 +402,22 @@ def unexplained(account_q, days, limit):
     if len(shown) < len(txns):
         summary += f" (showing {len(shown)} — use -n 0 for all)"
     click.echo(summary, err=True)
+
+
+def _unexplained_value(txn: dict) -> float:
+    """The still-unexplained amount as a float, falling back to the full amount.
+
+    Junk counts as 0.0 rather than raising: `format_amount` already degrades to
+    printing the raw value per line, so the summary shouldn't be the one thing
+    that aborts the command after the table has been printed.
+    """
+    raw = txn.get("unexplained_amount")
+    if raw is None or raw == "":
+        raw = txn.get("amount")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _is_partial(txn: dict) -> bool:

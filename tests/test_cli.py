@@ -432,3 +432,41 @@ class TestUnexplained:
 
         assert result.exit_code != 0
         assert "No bank account matches 'Nope'" in result.output
+
+    def test_summary_survives_junk_amounts(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-20.0", "unexplained_amount": "-20.0",
+             "description": "Fine", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/2", "dated_on": "2026-06-02",
+             "amount": None, "unexplained_amount": None,
+             "description": "Null amount", "matching_transactions_count": 0},
+            {"url": "/v2/bank_transactions/3", "dated_on": "2026-06-03",
+             "amount": "N/A", "unexplained_amount": "",
+             "description": "Junk amount", "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        # All three rows still print, and the total ignores what it can't parse.
+        assert len([ln for ln in result.stdout.splitlines() if ln.strip()]) == 3
+        assert "total -20.00 GBP" in result.stderr
+
+    def test_unexplained_amount_falls_back_to_amount(self, runner, mock_config, mock_api):
+        mock_api.bank_accounts.return_value = [ACCOUNTS[0]]
+        mock_api.bank_transactions.return_value = [
+            {"url": "/v2/bank_transactions/1", "dated_on": "2026-06-01",
+             "amount": "-30.0", "description": "No unexplained field",
+             "matching_transactions_count": 0},
+        ]
+
+        with patch("freeagent_cli.cli.cfg.load", return_value=mock_config), \
+             patch("freeagent_cli.cli.FreeAgent", return_value=mock_api):
+            result = runner.invoke(main, ["unexplained"])
+
+        assert result.exit_code == 0
+        assert "total -30.00 GBP" in result.stderr
