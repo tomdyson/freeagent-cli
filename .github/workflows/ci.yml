@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # Deliberately unfiltered: PRs are sometimes stacked on another feature
+  # branch rather than main, and those need checking too.
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches requires-python and the classifiers in pyproject.toml.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      # --locked fails if uv.lock has drifted from pyproject.toml, so a
+      # dependency change that wasn't re-locked is caught here rather than
+      # by whoever installs the tool next.
+      - name: Install dependencies
+        run: uv sync --locked --python ${{ matrix.python-version }}
+
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      # The console script is the whole product, so check it actually runs
+      # from the built wheel. Catches packaging mistakes tests can't see.
+      - name: Smoke-test the built wheel
+        run: uv run --no-project --with dist/*.whl freeagent-cli --help
